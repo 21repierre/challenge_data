@@ -1,0 +1,7 @@
+jupyter
+numpy
+matplotlib
+opencv-python
+tqdm
+h5py
+mediapipe
