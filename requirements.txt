@@ -5,3 +5,6 @@ opencv-python
 tqdm
 h5py
 mediapipe
+torch
+scikit-learn
+ray[tune]
