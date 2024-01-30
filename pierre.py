@@ -2,6 +2,7 @@ import os
 import tempfile
 
 import h5py
+import numpy as np
 import ray
 import torch
 from ray.air import session
@@ -9,19 +10,20 @@ from ray.train import Checkpoint
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
-import numpy as np
 
+BASE_PATH = os.getcwd()
 
 def load_dataset(batch_size, device):
-    h5f = h5py.File('/home/repierre/Documents/challenge_data/datasets/data_train_landmarks.h5', 'r')
+    h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_landmarks.h5', 'r')
     train_landmarks = h5f['data_train_landmarks'][:]
     h5f.close()
 
-    h5f = h5py.File('/home/repierre/Documents/challenge_data/datasets/data_train_labels.h5', 'r')
+    h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_labels.h5', 'r')
     train_labels = h5f['data_train_labels'][:]
     h5f.close()
 
-    X_train, X_valid, y_train, y_valid = train_test_split(train_landmarks.reshape((len(train_landmarks), 10, 3 * 478)), train_labels, test_size=0.2,
+    X_train, X_valid, y_train, y_valid = train_test_split(train_landmarks.reshape((len(train_landmarks), 10, 3 * 478)),
+                                                          train_labels, test_size=0.2,
                                                           random_state=12345)
     TX_train = torch.tensor(X_train, dtype=torch.float).to(device)
     Ty_train = torch.tensor(y_train, dtype=torch.long).to(device)
@@ -37,9 +39,8 @@ def load_dataset(batch_size, device):
 
     return train_batch, validation_batch
 
-
 def train_model(config):
-    #print(config)
+    # print(config)
     # Initialisation
     running_losses = []
     validation_losses = []
@@ -49,7 +50,8 @@ def train_model(config):
     SHOW_BAR = config['show_bar']
     # model = config['model'](n1=config['n1'], n2=config['n2'], n3=config['n3'], n4=config['n4'],
     #                        p1=config['p1'], p2=config['p2'], p3=config['p3'], p4=config['p4']).to(device)
-    model = config['model'](hidden=int(config['hidden']), lstm_layers=config['lstm_layers'], nns=config['nns']).to(device)
+    model = config['model'](hidden=int(config['hidden']), lstm_layers=config['lstm_layers'], nns=config['nns']).to(
+        device)
 
     loss_fn = config['loss_fn']()
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], weight_decay=1e-5)
@@ -118,7 +120,8 @@ def train_model(config):
             path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
             torch.save((model.state_dict(), optimizer.state_dict()), path)
             checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
-            ray.train.report({"loss": validation_loss, "accuracy": accuracy / validation_total}, checkpoint=checkpoint, )
+            ray.train.report({"loss": validation_loss, "accuracy": accuracy / validation_total},
+                             checkpoint=checkpoint, )
 
         # Handles a proper display
         if SHOW_BAR:
@@ -130,24 +133,36 @@ def train_model(config):
 
     return running_losses, validation_losses, accs, model
 
-
 class Model1(torch.nn.Module):
 
-    def __init__(self, hidden=20, lstm_layers=2, nns=[20]):
+    def __init__(self, hidden=20, lstm_layers=2, nns=[(20, 0.5)]):
         super().__init__()
         self.lstm = torch.nn.LSTM(input_size=1434, hidden_size=hidden, num_layers=lstm_layers, batch_first=True)
-        self.linear_after = torch.nn.Linear(hidden, nns[0])
+        self.conv = torch.nn.Sequential(
+            torch.nn.Conv1d(10, hidden, kernel_size=3, padding=1),
+            torch.nn.BatchNorm1d(hidden),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.MaxPool1d(2),
+        )
+        self.linear_after = torch.nn.Sequential(torch.nn.Linear(hidden * (hidden // 2), nns[0][0]), torch.nn.ReLU())
         self.stack = torch.nn.Sequential(*np.array([
-            [torch.nn.Linear(nns[i], nns[i + 1]), torch.nn.ReLU()] for i in range(len(nns) - 1)
+            [torch.nn.Linear(nns[i][0], nns[i + 1][0]), torch.nn.ReLU(), torch.nn.Dropout(nns[i][1])] for i in
+            range(len(nns) - 1)
         ]).flatten())
-        self.pred = torch.nn.Linear(nns[-1], 6)
+        self.pred = torch.nn.Linear(nns[-1][0], 6)
 
     def forward(self, x: torch.Tensor):
         # print(x.shape, "LSTM")
         x, (h_t) = self.lstm(x)
-        x = torch.sum(x, dim=1)
         # print(x)
         # print(x.shape)
+        x = self.conv(x)
+        # print(x.shape)
+        # x = torch.sum(x, dim=1)
+        # print(x.shape)
+        x = torch.nn.Flatten()(x)
+        # print(x.shape)
+
         x = self.linear_after(x)
         for l in self.stack:
             # print(x.shape, l)
