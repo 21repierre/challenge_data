@@ -1,21 +1,21 @@
 import os
-import tempfile
 
 import h5py
 import numpy as np
 import ray
 import torch
-from ray.air import session
-from ray.train import Checkpoint
 from sklearn.model_selection import train_test_split
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
+torch.autograd.set_detect_anomaly(True)
 BASE_PATH = os.getcwd()
 
-h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_landmarks.h5', 'r')
-train_landmarks = h5f['data_train_landmarks'][:]
-train_landmarks = np.array([train_landmarks[i][-1] for i in range(len(train_landmarks))])
+h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_images.h5', 'r')
+train_images = h5f['data_train_images'][:]
+train_images = np.array([train_images[i][-1] for i in range(len(train_images))])
+train_images = np.expand_dims(train_images, 1)
+print(train_images.shape)
 h5f.close()
 
 h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_labels.h5', 'r')
@@ -23,8 +23,8 @@ train_labels = h5f['data_train_labels'][:]
 h5f.close()
 
 def load_dataset(batch_size, device):
-    X_train, X_valid, y_train, y_valid = train_test_split(train_landmarks,
-                                                          train_labels, test_size=0.2,
+    X_train, X_valid, y_train, y_valid = train_test_split(train_images,
+                                                          train_labels, test_size=0.15,
                                                           random_state=12345)
     TX_train = torch.tensor(X_train, dtype=torch.float).to(device)
     Ty_train = torch.tensor(y_train, dtype=torch.long).to(device)
@@ -40,6 +40,78 @@ def load_dataset(batch_size, device):
 
     return train_batch, validation_batch
 
+def convBlock(inSize, outSize, pooling=False):
+    layers = [
+        torch.nn.Conv2d(inSize, outSize, kernel_size=3, padding=1),
+        torch.nn.BatchNorm2d(outSize),
+        torch.nn.ReLU()
+    ]
+    if pooling:
+        layers.append(torch.nn.MaxPool2d(kernel_size=2))
+
+    return torch.nn.Sequential(*layers)
+
+class ModelIm1(torch.nn.Module):
+    def __init__(self, inChannel, nns=[(512, 0.5)]):
+        super(ModelIm1, self).__init__()
+        # 1 * 200 * 200
+        self.conv1 = torch.nn.Sequential(
+            convBlock(inChannel, 16),
+            convBlock(16, 32, pooling=True)
+        )  # 32 * 100 * 100
+        self.residual1 = torch.nn.Sequential(
+            convBlock(32, 32),
+            convBlock(32, 32),
+        )  # 32 * 100 * 100
+        self.conv2 = torch.nn.Sequential(
+            convBlock(32, 64, True),
+            convBlock(64, 128, True)
+        )  # 128 * 25 * 25
+        self.residual2 = torch.nn.Sequential(
+            convBlock(128, 128),
+            convBlock(128, 128),
+        )  # 128 * 25 *25
+        self.conv3 = torch.nn.Sequential(
+            convBlock(128, 256, True),
+            convBlock(256, 512, True)
+        )  # 512 * 6 * 6
+        self.residual3 = torch.nn.Sequential(
+            convBlock(512, 512),
+            convBlock(512, 512),
+        )  # 512 * 6 * 6
+        self.classifier = torch.nn.Sequential(
+            torch.nn.MaxPool2d(kernel_size=2),
+            torch.nn.Flatten(),
+
+            torch.nn.Linear(512 * 3 * 3, nns[0][0]),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(nns[0][1]),
+
+            torch.nn.Linear(nns[0][0], nns[1][0]),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(nns[1][1]),
+
+            torch.nn.Linear(nns[-1][0], 6)
+        )
+
+    def forward(self, x):
+        # print(x.shape)
+        logits = self.conv1(x)
+        # print(logits.shape)
+        logits = logits + self.residual1(logits)
+        # print(logits.shape)
+        logits = self.conv2(logits)
+        # print(logits.shape)
+        logits = logits + self.residual2(logits)
+        # print(logits.shape)
+        logits = self.conv3(logits)
+        # print(logits.shape)
+        logits = logits + self.residual3(logits)
+        # print(logits.shape)
+        logits = self.classifier(logits)
+        # print(logits.shape)
+        return logits
+
 def train_model(config):
     # print(config)
     chk = None
@@ -54,20 +126,12 @@ def train_model(config):
     device = config['device']
     SHOW_BAR = config['show_bar']
 
-    model = config['model'](convs=config['convs'], nns=config['nns']).to(device)
+    model = config['model'](inChannel=1, nns=config['nns']).to(device)
 
     loss_fn = config['loss_fn']()
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], weight_decay=1e-5)
 
-    # We load the training at a specific checkpoint if wanted
-    checkpoint = session.get_checkpoint()
-    if checkpoint:
-        checkpoint_state = checkpoint.to_dict()
-        start_epoch = checkpoint_state["epoch"]
-        model.load_state_dict(checkpoint_state["net_state_dict"])
-        optimizer.load_state_dict(checkpoint_state["optimizer_state_dict"])
-    else:
-        start_epoch = 0
+    start_epoch = 0
 
     if chk is not None:
         model.load_state_dict(chk['model_state_dict'])
@@ -123,13 +187,8 @@ def train_model(config):
             validation_losses.append(validation_loss)
             accs.append(accuracy / validation_total)
 
-            # Creates a checkpoint if necessary
-            with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
-                path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
-                # torch.save((model.state_dict(), optimizer.state_dict()), path)
-                # checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
-                ray.train.report({"loss": validation_loss, "accuracy": accuracy / validation_total},
-                                 )
+            ray.train.report({"loss": validation_loss, "accuracy": accuracy / validation_total},
+                             )
 
             # Handles a proper display
             if SHOW_BAR:
@@ -142,45 +201,3 @@ def train_model(config):
         bar.close()
 
     return running_losses, validation_losses, accs, epoch, model, optimizer
-
-class Model1(torch.nn.Module):
-
-    def __init__(self, convs=[20, 20], lstm_layers=2, nns=[(20, 0.5)]):
-        super().__init__()
-        # self.lstm = torch.nn.LSTM(input_size=1434, hidden_size=hidden, num_layers=lstm_layers, batch_first=True)
-        self.conv = torch.nn.Sequential(
-            torch.nn.Conv1d(478, convs[0], kernel_size=2),
-            torch.nn.BatchNorm1d(convs[0]),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool1d(2),
-
-            torch.nn.Conv1d(convs[0], convs[1], kernel_size=1),
-            torch.nn.BatchNorm1d(convs[1]),
-            torch.nn.ReLU(),
-            # torch.nn.MaxPool1d(2),
-        )
-        self.linear_after = torch.nn.Sequential(torch.nn.Linear(convs[-1], nns[0][0]), torch.nn.ReLU())
-        self.stack = torch.nn.Sequential(*np.array([
-            [torch.nn.Linear(nns[i][0], nns[i + 1][0]), torch.nn.ReLU(), torch.nn.Dropout(nns[i][1])] for i in
-            range(len(nns) - 1)
-        ]).flatten())
-        self.pred = torch.nn.Linear(nns[-1][0], 6)
-
-    def forward(self, x: torch.Tensor):
-        # print(x.shape, "LSTM")
-        # x, (h_t) = self.lstm(x)
-        # print(x)
-        # print(x.shape)
-        x = self.conv(x)
-        # print(x.shape)
-        # x = torch.sum(x, dim=1)
-        # print(x.shape)
-        x = torch.nn.Flatten()(x)
-        # print(x.shape)
-
-        x = self.linear_after(x)
-        for l in self.stack:
-            # print(x.shape, l)
-            x = l(x)
-        # print(x.shape)
-        return self.pred(x)
