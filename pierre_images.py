@@ -4,8 +4,9 @@ import h5py
 import numpy as np
 import ray
 import torch
+import torchvision.transforms
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 torch.autograd.set_detect_anomaly(True)
@@ -13,36 +14,88 @@ BASE_PATH = os.getcwd()
 
 h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_images.h5', 'r')
 train_images = h5f['data_train_images'][:]
+h5f.close()
+
 train_images = np.array([train_images[i][-1] for i in range(len(train_images))])
 train_images = np.expand_dims(train_images, 1)
-print(train_images.shape)
-h5f.close()
 
 h5f = h5py.File(f'{BASE_PATH}/datasets/data_train_labels.h5', 'r')
 train_labels = h5f['data_train_labels'][:]
 h5f.close()
 
+X_train, X_valid, y_train, y_valid = train_test_split(train_images,
+                                                      train_labels, test_size=0.15,
+                                                      random_state=12345)
+
+augments = torchvision.transforms.Compose([
+    torchvision.transforms.RandomHorizontalFlip(),
+    torchvision.transforms.RandomRotation(25),
+    torchvision.transforms.RandomAffine(degrees=0, translate=(0.01, 0.2), shear=(0.01, 0.04), scale=(0.8, 0.9)),
+    # torchvision.transforms.RandomAutocontrast(),
+])
+
+## top
+h5f = h5py.File(f'{BASE_PATH}/datasets/data_test_images.h5', 'r')
+test_images = h5f['data_test_images'][:]
+h5f.close()
+
+test_images = np.array([test_images[i][-1] for i in range(len(test_images))])
+test_images = np.expand_dims(test_images, 1)
+
+h5f = h5py.File(f'{BASE_PATH}/datasets/data_test_labels.h5', 'r')
+test_labels = h5f['data_test_labels'][:]
+h5f.close()
+
+
+##
+
+
+class CustomTensorDataset(Dataset):
+    def __init__(self, tensors, transform=None):
+        assert all(tensors[0].size(0) == tensor.size(0) for tensor in tensors)
+        self.tensors = tensors
+        self.transform = transform
+
+    def __getitem__(self, index):
+        x = self.tensors[0][index]
+
+        if self.transform:
+            x = self.transform(x)
+
+        y = self.tensors[1][index]
+
+        return x, y
+
+    def __len__(self):
+        return self.tensors[0].size(0)
+
+
 def load_dataset(batch_size, device):
-    X_train, X_valid, y_train, y_valid = train_test_split(train_images,
-                                                          train_labels, test_size=0.15,
-                                                          random_state=12345)
     TX_train = torch.tensor(X_train, dtype=torch.float).to(device)
     Ty_train = torch.tensor(y_train, dtype=torch.long).to(device)
 
-    TX_test = torch.tensor(X_valid, dtype=torch.float).to(device)
-    Ty_test = torch.tensor(y_valid, dtype=torch.long).to(device)
+    TX_valid = torch.tensor(X_valid, dtype=torch.float).to(device)
+    Ty_valid = torch.tensor(y_valid, dtype=torch.long).to(device)
 
-    t_dataset_train = TensorDataset(TX_train, Ty_train)
-    t_dataset_test = TensorDataset(TX_test, Ty_test)
+    TX_test = torch.tensor(test_images, dtype=torch.float).to(device)
+    Ty_test = torch.tensor(test_labels, dtype=torch.long).to(device)
+
+    t_dataset_train = CustomTensorDataset((TX_train, Ty_train))
+    t_dataset_generalization = CustomTensorDataset((TX_train, Ty_train), transform=augments)
+    t_dataset_valid = CustomTensorDataset((TX_valid, Ty_valid))
+    t_dataset_test = CustomTensorDataset((TX_test, Ty_test))
 
     train_batch = DataLoader(t_dataset_train, batch_size=batch_size, shuffle=True)
-    validation_batch = DataLoader(t_dataset_test, batch_size=batch_size, shuffle=True)
+    train_generalization_batch = DataLoader(t_dataset_generalization, batch_size=batch_size, shuffle=True)
+    validation_batch = DataLoader(t_dataset_valid, batch_size=batch_size, shuffle=True)
+    test_batch = DataLoader(t_dataset_test, batch_size=batch_size, shuffle=True)
 
-    return train_batch, validation_batch
+    return train_batch, validation_batch, train_generalization_batch, test_batch
 
-def convBlock(inSize, outSize, pooling=False):
+
+def convBlock(inSize, outSize, pooling=False, kernel_size=3):
     layers = [
-        torch.nn.Conv2d(inSize, outSize, kernel_size=3, padding=1),
+        torch.nn.Conv2d(inSize, outSize, kernel_size=kernel_size, padding=1),
         torch.nn.BatchNorm2d(outSize),
         torch.nn.ReLU()
     ]
@@ -51,8 +104,9 @@ def convBlock(inSize, outSize, pooling=False):
 
     return torch.nn.Sequential(*layers)
 
+
 class ModelIm1(torch.nn.Module):
-    def __init__(self, inChannel, nns=[(512, 0.5)]):
+    def __init__(self, inChannel=1, nns=[(512, 0.5)]):
         super(ModelIm1, self).__init__()
         # 1 * 200 * 200
         self.conv1 = torch.nn.Sequential(
@@ -71,19 +125,11 @@ class ModelIm1(torch.nn.Module):
             convBlock(128, 128),
             convBlock(128, 128),
         )  # 128 * 25 *25
-        self.conv3 = torch.nn.Sequential(
-            convBlock(128, 256, True),
-            convBlock(256, 512, True)
-        )  # 512 * 6 * 6
-        self.residual3 = torch.nn.Sequential(
-            convBlock(512, 512),
-            convBlock(512, 512),
-        )  # 512 * 6 * 6
         self.classifier = torch.nn.Sequential(
             torch.nn.MaxPool2d(kernel_size=2),
             torch.nn.Flatten(),
 
-            torch.nn.Linear(512 * 3 * 3, nns[0][0]),
+            torch.nn.Linear(128 * 12 * 12, nns[0][0]),
             torch.nn.ReLU(),
             torch.nn.Dropout(nns[0][1]),
 
@@ -104,13 +150,83 @@ class ModelIm1(torch.nn.Module):
         # print(logits.shape)
         logits = logits + self.residual2(logits)
         # print(logits.shape)
-        logits = self.conv3(logits)
-        # print(logits.shape)
-        logits = logits + self.residual3(logits)
-        # print(logits.shape)
         logits = self.classifier(logits)
         # print(logits.shape)
         return logits
+
+
+class ModelIm2(torch.nn.Module):
+    def __init__(self, inChannel=1, nns=[(512, 0.5)]):
+        super(ModelIm2, self).__init__()
+        # 1 * 200 * 200
+        self.conv1 = torch.nn.Sequential(
+            convBlock(inChannel, 64, True, 7),
+            torch.nn.MaxPool2d(kernel_size=2),
+        )  # 64 * 49 * 49
+
+        self.residuals1 = torch.nn.Sequential(*[torch.nn.Sequential(
+            convBlock(64, 64),
+            convBlock(64, 64),
+        ) for _ in range(3)])
+        # 64 * 49 * 49
+
+        self.conv2 = torch.nn.Sequential(
+            convBlock(64, 128, True),
+            convBlock(128, 128)
+        )  # 128 * 25 * 25
+
+        self.residuals2 = torch.nn.Sequential(*[torch.nn.Sequential(
+            convBlock(128, 128),
+            convBlock(128, 128),
+        ) for _ in range(3)])
+        # 128 * 25 * 25
+
+        self.conv3 = torch.nn.Sequential(
+            convBlock(128, 256, True),
+            convBlock(256, 256)
+        )  # 256 * 12 * 12
+
+        self.residuals3 = torch.nn.Sequential(*[torch.nn.Sequential(
+            convBlock(256, 256),
+            convBlock(256, 256),
+        ) for _ in range(3)])
+        # 256 * 12 * 12
+
+        self.classifier = torch.nn.Sequential(
+            torch.nn.AvgPool2d(2),
+            # torch.nn.MaxPool2d(kernel_size=2),
+            torch.nn.Flatten(),
+
+            torch.nn.Linear(256 * 6 * 6, nns[0][0]),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(nns[0][1]),
+
+            torch.nn.Linear(nns[0][0], nns[1][0]),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(nns[1][1]),
+
+            torch.nn.Linear(nns[-1][0], 6)
+        )
+
+    def forward(self, x):
+        logits = self.conv1(x)
+
+        for res in self.residuals1:
+            logits = logits + res(logits)
+
+        logits = self.conv2(logits)
+
+        for res in self.residuals2:
+            logits = logits + res(logits)
+
+        logits = self.conv3(logits)
+
+        for res in self.residuals3:
+            logits = logits + res(logits)
+
+        logits = self.classifier(logits)
+        return logits
+
 
 def train_model(config):
     # print(config)
@@ -122,6 +238,7 @@ def train_model(config):
     running_losses = []
     validation_losses = []
     accs = []
+    test_accs = []
 
     device = config['device']
     SHOW_BAR = config['show_bar']
@@ -139,7 +256,7 @@ def train_model(config):
         start_epoch = chk['epoch']
 
     # Get the DataLoaders
-    train_batch, validation_batch = load_dataset(batch_size=config['batch_size'], device=device)
+    train_batch, validation_batch, train_generalization_batch, test_batch = load_dataset(batch_size=config['batch_size'], device=device)
 
     # Used for a better display using tqdm
     MAX_EPOCH = config['max_epoch']
@@ -153,7 +270,8 @@ def train_model(config):
             model.train()
 
             # Computes the running loss during training
-            for _, data in enumerate(train_batch):
+            trainer = train_generalization_batch if epoch >= config['min_generalization_epoch'] and epoch % config['generalization_step'] < config['generalization_duration'] else train_batch
+            for _, data in enumerate(trainer):
                 inputs, labels = data
                 optimizer.zero_grad()
                 outputs = model(inputs)
@@ -167,8 +285,8 @@ def train_model(config):
             validation_loss = 0.
             accuracy = 0
             validation_total = 0
-            model.eval()
 
+            model.eval()
             # Test the model and evaluates the performances
             for _, data in enumerate(validation_batch):
                 # No computation of the gradient for better performances
@@ -181,23 +299,38 @@ def train_model(config):
                     validation_total += labels.size(0)
                     accuracy += (torch.argmax(outputs, dim=1) == labels).sum().item()
 
+            test_loss = 0
+            test_acc = 0
+            test_total = 0
+            for _, data in enumerate(test_batch):
+                # No computation of the gradient for better performances
+                with torch.no_grad():
+                    inputs, labels = data
+                    outputs = model(inputs).squeeze()
+                    # print(torch.argmax(outputs, dim=1), labels.squeeze())
+                    loss = loss_fn(outputs, labels.squeeze())
+                    test_loss += loss.item()
+                    test_total += labels.size(0)
+                    test_acc += (torch.argmax(outputs, dim=1) == labels).sum().item()
+
             running_loss /= len(train_batch)
             validation_loss /= len(validation_batch)
+            test_loss /= len(test_batch)
             running_losses.append(running_loss)
             validation_losses.append(validation_loss)
             accs.append(accuracy / validation_total)
+            test_accs.append(test_acc / test_total)
 
-            ray.train.report({"loss": validation_loss, "accuracy": accuracy / validation_total},
-                             )
+            ray.train.report({"loss": validation_loss, 'test_loss': test_loss, "accuracy": accuracy / validation_total, "test_accuracy": test_acc / test_total})
 
             # Handles a proper display
             if SHOW_BAR:
                 bar.update(1)
                 bar.set_postfix(
-                    str=f"Running loss: {running_loss:.3f} - Validation loss: {validation_loss:.3f} | Accuracy: {accuracy / validation_total:.3f}.")
+                    str=f"Running loss: {running_loss:.4f} - Validation loss: {validation_loss:.4f} | Accuracy: {accuracy / validation_total:.4f} | Test acc: {test_acc / test_total:.4f}")
     except KeyboardInterrupt:
         print(f"Saving model at {epoch} steps.")
     if SHOW_BAR:
         bar.close()
 
-    return running_losses, validation_losses, accs, epoch, model, optimizer
+    return running_losses, validation_losses, accs, test_accs, epoch, model, optimizer

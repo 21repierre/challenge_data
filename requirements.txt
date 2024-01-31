@@ -7,3 +7,4 @@ h5py
 mediapipe
 scikit-learn
 ray[tune]
+chardet

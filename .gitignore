@@ -5,3 +5,5 @@ datasets/*
 .ipynb_checkpoints/
 
 __pycache__/
+
+models_images/
