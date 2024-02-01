@@ -132,12 +132,12 @@ def mctrain():
 def mtrain():
     MAX_EPOCH = 400
     config = {
-        'nns': [(1024, 0.3), (512, 0.4)],
-        'min_generalization_epoch': 0,
+        'nns': [(128, 0.0)],
+        'min_generalization_epoch': 400,
         'generalization_step': 98,
         'generalization_duration': 98,
-        'lr': 1e-4,
-        'batch_size': 32,
+        'lr': 1e-3,
+        'batch_size': 64,
         'model': ModelIm2,
         'loss_fn': torch.nn.CrossEntropyLoss,
         'loader': load_dataset,

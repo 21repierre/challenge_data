@@ -30,10 +30,10 @@ X_train, X_valid, y_train, y_valid = train_test_split(train_images,
                                                       random_state=12345)
 
 default_tr = torchvision.transforms.Compose([
-    torch.nn.AvgPool2d(kernel_size=4)
+    torch.nn.AvgPool2d(kernel_size=5)
 ])
 augments = torchvision.transforms.Compose([
-    torch.nn.AvgPool2d(kernel_size=4),
+    torch.nn.AvgPool2d(kernel_size=5),
     torchvision.transforms.RandomHorizontalFlip(),
     torchvision.transforms.RandomRotation(25),
     torchvision.transforms.RandomAffine(degrees=0, translate=(0.01, 0.2), shear=(0.01, 0.04), scale=(0.8, 0.9)),
@@ -66,7 +66,7 @@ class CustomTensorDataset(Dataset):
 
         if self.transform:
             x = self.transform(x)
-
+        #print(x.shape)
         y = self.tensors[1][index]
 
         return x, y
@@ -165,11 +165,11 @@ class ModelIm2(torch.nn.Module):
         super(ModelIm2, self).__init__()
         # 10 * 200 * 200
 
-        self.base = torchvision.models.resnet50()
+        self.base = torchvision.models.resnet152()
         self.base.conv1 = torch.nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.base.fc = torch.nn.Sequential(torch.nn.Linear(self.base.fc.in_features, 256))
+        self.base.fc = torch.nn.Sequential(torch.nn.Linear(self.base.fc.in_features, 300))
 
-        self.lstm = torch.nn.LSTM(256, 256, 3)
+        self.lstm = torch.nn.LSTM(300, 256, 3)
 
         self.classifier = torch.nn.Sequential(
 
@@ -177,9 +177,9 @@ class ModelIm2(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Dropout(nns[0][1]),
 
-            torch.nn.Linear(nns[0][0], nns[1][0]),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(nns[1][1]),
+            # torch.nn.Linear(nns[0][0], nns[1][0]),
+            # torch.nn.ReLU(),
+            # torch.nn.Dropout(nns[1][1]),
 
             torch.nn.Linear(nns[-1][0], 6)
         )
