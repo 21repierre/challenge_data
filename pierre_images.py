@@ -29,7 +29,11 @@ X_train, X_valid, y_train, y_valid = train_test_split(train_images,
                                                       train_labels, test_size=0.15,
                                                       random_state=12345)
 
+default_tr = torchvision.transforms.Compose([
+    torch.nn.AvgPool2d(kernel_size=4)
+])
 augments = torchvision.transforms.Compose([
+    torch.nn.AvgPool2d(kernel_size=4),
     torchvision.transforms.RandomHorizontalFlip(),
     torchvision.transforms.RandomRotation(25),
     torchvision.transforms.RandomAffine(degrees=0, translate=(0.01, 0.2), shear=(0.01, 0.04), scale=(0.8, 0.9)),
@@ -37,16 +41,16 @@ augments = torchvision.transforms.Compose([
 ])
 
 ## top
-"""h5f = h5py.File(f'{BASE_PATH}/datasets/data_test_images.h5', 'r')
+h5f = h5py.File(f'{BASE_PATH}/datasets/data_test_images.h5', 'r')
 test_images = h5f['data_test_images'][:]
 h5f.close()
 
-test_images = np.array([test_images[i][-1] for i in range(len(test_images))])
-test_images = np.expand_dims(test_images, 1)
+#test_images = np.array([test_images[i][-1] for i in range(len(test_images))])
+test_images = np.expand_dims(test_images, 2)
 
 h5f = h5py.File(f'{BASE_PATH}/datasets/data_test_labels.h5', 'r')
 test_labels = h5f['data_test_labels'][:]
-h5f.close()"""
+h5f.close()
 
 ##
 
@@ -70,6 +74,7 @@ class CustomTensorDataset(Dataset):
     def __len__(self):
         return self.tensors[0].size(0)
 
+
 def load_dataset(batch_size, device):
     TX_train = torch.tensor(X_train, dtype=torch.float).to(device)
     Ty_train = torch.tensor(y_train, dtype=torch.long).to(device)
@@ -77,20 +82,21 @@ def load_dataset(batch_size, device):
     TX_valid = torch.tensor(X_valid, dtype=torch.float).to(device)
     Ty_valid = torch.tensor(y_valid, dtype=torch.long).to(device)
 
-    # TX_test = torch.tensor(test_images, dtype=torch.float).to(device)
-    # Ty_test = torch.tensor(test_labels, dtype=torch.long).to(device)
+    TX_test = torch.tensor(test_images, dtype=torch.float).to(device)
+    Ty_test = torch.tensor(test_labels, dtype=torch.long).to(device)
 
-    t_dataset_train = CustomTensorDataset((TX_train, Ty_train))
+    t_dataset_train = CustomTensorDataset((TX_train, Ty_train), transform=default_tr)
     t_dataset_generalization = CustomTensorDataset((TX_train, Ty_train), transform=augments)
-    t_dataset_valid = CustomTensorDataset((TX_valid, Ty_valid))
-    # t_dataset_test = CustomTensorDataset((TX_test, Ty_test))
+    t_dataset_valid = CustomTensorDataset((TX_valid, Ty_valid), transform=default_tr)
+    t_dataset_test = CustomTensorDataset((TX_test, Ty_test), transform=default_tr)
 
     train_batch = DataLoader(t_dataset_train, batch_size=batch_size, shuffle=True)
     train_generalization_batch = DataLoader(t_dataset_generalization, batch_size=batch_size, shuffle=True)
     validation_batch = DataLoader(t_dataset_valid, batch_size=batch_size, shuffle=True)
-    # test_batch = DataLoader(t_dataset_test, batch_size=batch_size, shuffle=True)
+    test_batch = DataLoader(t_dataset_test, batch_size=batch_size, shuffle=True)
 
-    return train_batch, validation_batch, train_generalization_batch,  # test_batch
+    return train_batch, validation_batch, train_generalization_batch, test_batch
+
 
 def convBlock(inSize, outSize, pooling=False, kernel_size=3):
     layers = [
@@ -102,6 +108,7 @@ def convBlock(inSize, outSize, pooling=False, kernel_size=3):
         layers.append(torch.nn.MaxPool2d(kernel_size=2))
 
     return torch.nn.Sequential(*layers)
+
 
 class ModelIm1(torch.nn.Module):
     def __init__(self, inChannel=1, nns=[(512, 0.5)]):
@@ -152,6 +159,7 @@ class ModelIm1(torch.nn.Module):
         # print(logits.shape)
         return logits
 
+
 class ModelIm2(torch.nn.Module):
     def __init__(self, inChannel=10, nns=[(512, 0.5)]):
         super(ModelIm2, self).__init__()
@@ -177,15 +185,18 @@ class ModelIm2(torch.nn.Module):
         )
 
     def forward(self, X):
-        # batch * 10 * 200 * 200
+        # batch * 10 * 1 * 50 * 50
         hidden = None
+        #print(X.shape)
         for i in range(X.size(1)):
             x = X[:, i, :, :, :]
+            #print(x.shape)
             x = self.base(x)
             out, hidden = self.lstm(x.unsqueeze(0), hidden)
 
         x = self.classifier(out[-1, :, :])
         return x
+
 
 def train_model(config):
     # print(config)
@@ -215,7 +226,7 @@ def train_model(config):
         start_epoch = chk['epoch']
 
     # Get the DataLoaders
-    train_batch, validation_batch, train_generalization_batch = load_dataset(
+    train_batch, validation_batch, train_generalization_batch, test_batch = load_dataset(
         batch_size=config['batch_size'], device=device)
 
     # Used for a better display using tqdm
@@ -263,7 +274,7 @@ def train_model(config):
             test_loss = 0
             test_acc = 0
             test_total = 0
-            """for _, data in enumerate(test_batch):
+            for _, data in enumerate(test_batch):
                 # No computation of the gradient for better performances
                 with torch.no_grad():
                     inputs, labels = data
@@ -272,11 +283,11 @@ def train_model(config):
                     loss = loss_fn(outputs, labels.squeeze())
                     test_loss += loss.item()
                     test_total += labels.size(0)
-                    test_acc += (torch.argmax(outputs, dim=1) == labels).sum().item()"""
+                    test_acc += (torch.argmax(outputs, dim=1) == labels).sum().item()
 
             running_loss /= len(train_batch)
             validation_loss /= len(validation_batch)
-            # test_loss /= len(test_batch)
+            test_loss /= len(test_batch)
             running_losses.append(running_loss)
             validation_losses.append(validation_loss)
             accs.append(accuracy / validation_total)

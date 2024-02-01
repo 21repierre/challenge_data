@@ -11,7 +11,6 @@ from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
 from torch.utils.data import DataLoader
 
-from pierre_image_resnet import ResNet18, VGG
 from pierre_images import train_model, load_dataset, ModelIm1, ModelIm2
 
 device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -25,7 +24,7 @@ def ttrain():
         'generalization_step': tune.choice(np.arange(1, 100, 1)),
         'min_generalization_epoch': tune.choice(np.arange(1, 100, 1)),
         'generalization_duration': tune.choice(np.arange(1, 100, 1)),
-        "lr": 1e-5,
+        "lr": 1e-4,
         "batch_size": tune.choice([32, 64]),
         'model': tune.choice([ModelIm1]),
         'loss_fn': torch.nn.CrossEntropyLoss,
@@ -137,8 +136,8 @@ def mtrain():
         'min_generalization_epoch': 0,
         'generalization_step': 98,
         'generalization_duration': 98,
-        'lr': 1e-5,
-        'batch_size': 16,
+        'lr': 1e-4,
+        'batch_size': 32,
         'model': ModelIm2,
         'loss_fn': torch.nn.CrossEntropyLoss,
         'loader': load_dataset,

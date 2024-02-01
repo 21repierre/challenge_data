@@ -6,4 +6,9 @@ datasets/*
 
 __pycache__/
 
+models_images/data_train_images.h5
+models_images/data_test_images.h5
+models_images/data_test_landmarks.h5
+models_images/data_train_landmarks.h5
+
 models_images/
